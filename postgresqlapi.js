@@ -225,6 +225,33 @@ app.put("/profile", authenticate, uploads.single("profile_image"), async (req, r
   }
 });
 
+app.put("/change-password",authenticate,async(req,res)=>{
+  const { oldPassword,newPassword } = req.body;
+
+  if(!oldPassword || !newPassword)
+    return res.status(400).json({message:"All fields are required"});
+
+  try{
+    const result= await pool.query("SELECT password FROM users WHERE id=$1",[req.user.id]);
+    if(result.rows.length === 0)
+      return res.status(400).json({message:"user not found"});
+
+    const isMatch = await bcrypt.compare(oldPassword,result.rows[0].password);
+    if(!isMatch)
+      return res.status(400).json({message:"Old password is incorrect"});
+
+    const hashedPassword = await bcrypt.hash(newPassword,8);
+    await pool.query("UPDATE users SET password=$1 WHERE id=$2",[hashedPassword,req.user.id]);
+    console.log(`User ${req.user.username} changed password`);
+
+    res.json({message:"Password updated succesfully"});
+  }catch(err){
+    console.error(err);
+    res.status(500).json({message:"Server error"});
+  }
+})
+
+
 app.listen(PORT, () => {
   console.log(`🚀 PostgreSQL API running at http://localhost:${PORT}`);
 });
