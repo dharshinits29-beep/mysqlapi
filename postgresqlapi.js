@@ -7,6 +7,7 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 const multer = require ("multer");
 const path = require("path");
+const { off } = require("process");
 const fs = require ("fs").promises;
 
 
@@ -17,7 +18,7 @@ const PORT = process.env.PORT || 5001;
 app.use(cors());
 app.use(bodyParser.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
+app.use("/productUploads", express.static(path.join(__dirname,"productUploads")));
 
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -26,6 +27,8 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   port: 5432, 
 });
+
+
 
 pool.connect()
   .then(() => console.log(" Connected to PostgreSQL"))
@@ -46,7 +49,22 @@ pool.connect()
     )
   `);
   console.log(" Users table ready");
+
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id SERIAL PRIMARY KEY,
+      productName VARCHAR(255) NOT NULL,
+      price NUMERIC NOT NULL,
+      description TEXT,
+      tags JSON,
+      productCategory VARCHAR(100),
+      image JSON
+    )
+  `);
+  console.log("Products table ready");
 })();
+
 
 const storage = multer.diskStorage({
   destination: function(req, file, cb) {
@@ -56,8 +74,35 @@ const storage = multer.diskStorage({
     cb(null, Date.now() + "-" + file.originalname); 
   }
 });
-
+ 
 const uploads=multer({storage});
+
+const productStorage = multer.diskStorage({
+ destination: (req, file, cb) => {
+  cb(null, path.join(__dirname, "productUploads"));
+},
+
+  filename: (req, file, cb) => {
+    
+    if (!req.uploadTimestamp) req.uploadTimestamp = Date.now();
+
+    const ext = path.extname(file.originalname).toLowerCase();
+    const uniqueSuffix = Math.floor(Math.random() * 10000); 
+    const filename = `${req.uploadTimestamp}-${uniqueSuffix}${ext}`;
+    cb(null, filename);
+  },
+});
+
+const fileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (![".jpg", ".jpeg", ".png"].includes(ext)) {
+    return cb(new Error("Only .jpg, .jpeg, .png allowed"));
+  }
+  cb(null, true);
+};
+
+
+const productUploads = multer({ storage: productStorage,fileFilter});
 
 const authenticate = (req,res,next)=>{
   const token = req.headers["authentication"];
@@ -98,11 +143,11 @@ app.post("/register", async (req, res) => {
 
 
 app.post("/login", async (req, res) => {
-  const { username, email, password } = req.body;
-  if (!username || !email || !password) return res.status(400).json({ message: "All fields required" });
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ message: "All fields required" });
 
   try {
-    const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
+    const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
     if (result.rows.length === 0) return res.status(400).json({ message: "Invalid username" });
 
     const user = result.rows[0];
@@ -111,7 +156,7 @@ app.post("/login", async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: "Invalid password" });
 
-    const token = jwt.sign({ id: user.id, username: user.username, email: user.email }, process.env.JWT_SECRET);
+    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET);
     console.log("Generrated JWT token:",token);
 
     const { password: _, ...userWithoutPassword } = user;
@@ -207,7 +252,6 @@ app.put("/profile", authenticate, uploads.single("profile_image"), async (req, r
       }
     }
 
-    
     const result = await pool.query(
       `UPDATE users
        SET username=$1,
@@ -242,15 +286,74 @@ app.put("/change-password",authenticate,async(req,res)=>{
 
     const hashedPassword = await bcrypt.hash(newPassword,8);
     await pool.query("UPDATE users SET password=$1 WHERE id=$2",[hashedPassword,req.user.id]);
-    console.log(`User ${req.user.username} changed password`);
 
     res.json({message:"Password updated succesfully"});
   }catch(err){
     console.error(err);
     res.status(500).json({message:"Server error"});
   }
-})
+});
 
+app.post("/products", productUploads.array("productImage"), async (req, res) => {
+   console.log("FILES RECEIVED:", req.files); 
+  console.log("BODY:", req.body);
+  try {
+    const { productName, price, description, tags, productCategory } = req.body;
+    const parsedTags = JSON.parse(tags);
+
+  
+    const imageFilenames = req.files.map(file => file.filename);
+
+    await pool.query(
+      `INSERT INTO products (productName, price, description, tags, productCategory, image)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [productName, price, description, parsedTags, productCategory, JSON.stringify(imageFilenames)]
+    );
+
+    res.status(201).json({ message: "Product created successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+app.get("/addproduct", async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    const productResult = await pool.query(
+      `SELECT id,
+              productname AS "productName",
+              price,
+              description,
+              tags,
+              productcategory AS "productCategory",
+              image
+       FROM products
+       ORDER BY id
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const products = productResult.rows.map((product) => ({
+      ...product,
+      tags: Array.isArray(product.tags) ? product.tags : [],
+      image: Array.isArray(product.image) ? product.image : [],
+    }));
+
+    const countResult = await pool.query("SELECT COUNT(*) AS total FROM products");
+    const totalProduct = parseInt(countResult.rows[0].total);
+    const totalPage = Math.ceil(totalProduct / limit);
+
+    res.json({ page, limit, totalProduct, totalPage, products });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`🚀 PostgreSQL API running at http://localhost:${PORT}`);
