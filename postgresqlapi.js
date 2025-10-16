@@ -63,6 +63,7 @@ pool.connect()
     )
   `);
   console.log("Products table ready");
+
 })();
 
 
@@ -354,6 +355,52 @@ app.get("/addproduct", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+app.put("/products/:id/likes", async (req, res) => {
+  try {
+    const { id } = req.params;       
+    const { userid } = req.body;     
+
+    const userId=parseInt(userid);  
+    const productId=parseInt(id);
+
+    if(!userId || !productId){
+      return res.status(400).json({message:"userId and productId is required"}) 
+    }
+
+    const result = await pool.query(
+      "SELECT * FROM addlikes WHERE userid=$1 AND productid=$2",
+      [userId, productId]
+    );
+
+    if (result.rows.length === 0) {
+      
+      await pool.query(
+        "INSERT INTO addlikes (userid, productid, likes) VALUES ($1, $2, 1)",
+        [userId, productId]);
+
+      await pool.query(
+        "UPDATE products SET likes = COALESCE(likes, 0) + 1 WHERE id=$1",
+        [productId]);
+
+      return res.status(200).json({ message: "Liked successfully", liked: true });
+    } else {
+      await pool.query(
+        "DELETE FROM addlikes WHERE userid=$1 AND productid=$2",
+        [userId, productId]);
+
+      await pool.query(
+        "UPDATE products SET likes = GREATEST(COALESCE(likes, 1) - 1, 0) WHERE id=$1",
+        [productId]);
+
+      return res.status(200).json({ message: "Unliked successfully", liked: false });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`🚀 PostgreSQL API running at http://localhost:${PORT}`);
